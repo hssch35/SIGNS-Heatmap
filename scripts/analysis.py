@@ -1,98 +1,138 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
 import re
+from pathlib import Path
+from typing import List, Dict, Tuple
 
-
-base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-data_path = os.path.join(base_path, 'data', 'kbo_data.csv')
-text_path = os.path.join(base_path, 'data', 'transliteration.txt')
-output_path = os.path.join(base_path, 'results', 'visual_strategy_kbo18.png')
-
-def parse_transliteration(filepath):
-    text_map = {}
-    if not os.path.exists(filepath):
-        print(f"Hinweis: Umschrift-Datei nicht gefunden unter {filepath}")
-        return text_map
-    pattern = re.compile(r'(Vs\.|Rs\.)\s*(\d+)')
-    try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
-            for line in f:
-                match = pattern.search(line)
-                if match:
-                    side, num = match.group(1), int(match.group(2))
-                    final_num = num + 45 if 'Rs' in side else num
-                    text_map[final_num] = line.strip()
-    except Exception as e:
-        print(f"Fehler beim Lesen der Umschrift: {e}")
-    return text_map
-
-def run_analysis():
-    print("Suche Datei...")
-    if not os.path.exists(data_path):
-        print(f"FEHLER: Datei nicht gefunden! Pfad: {data_path}")
-        return
-
-    
-    try:
+class KBoAnalyzer:
+    COLORS = {0: '#2c7bb6', 1: '#fdae61', 2: '#d7191c'}
+    MARKERS = {0: 'o', 1: 's', 2: 'D'}
+    LABELS = {
+        0: 'Hethitisch (Score 0)',
+        1: 'Hybrid (Score 1)',
+        2: 'Assyro-Mittani (Score 2)'
+    }
+    OBVERSE_REVERSE_SPLIT = 45.5
         
-        df = pd.read_csv(data_path, sep=',', encoding='utf-8-sig')
-        if df.shape[1] < 2: 
-            df = pd.read_csv(data_path, sep=';', encoding='utf-8-sig')
-    except:
-        df = pd.read_csv(data_path, sep=';', encoding='latin-1')
+    def __init__(self, file_path: str, output_path: str):
+        self.file_path = Path(file_path)
+        self.output_path = Path(output_path)
+        self.df = None
+        self.plot_data = []
 
-    
-    df['Zeichen (Sign)'] = df['Zeichen (Sign)'].ffill()
-    
-    trans_map = parse_transliteration(text_path)
-    
-    plot_data = []
-    for _, row in df.iterrows():
-        refs = str(row['Belegstellen (KBo 1.8++)'])
-        if 'passim' in refs.lower() or pd.isna(refs): continue
+    def load_data(self) -> bool:
+        if not self.file_path.exists():
+            return False
+        try:
+            self.df = pd.read_csv(
+                self.file_path,
+                sep=';',
+                encoding='utf-8-sig',
+                engine='python'
+            )
+            return True
+        except:
+            return False
+
+    def clean_sign_name(self, raw_name: str) -> str:
+        return re.sub(r'\s*\(\d+\)', '', str(raw_name)).strip()
+
+    def parse_references(self, refs: str) -> Tuple[List[int], bool]:
+        refs_lower = str(refs).lower()
+        line_numbers = [int(n) for n in re.findall(r'\d+', refs_lower)]
+        reverse_indicators = ['rev', 'rs', "'"]
+        is_reverse = any(indicator in refs_lower for indicator in reverse_indicators)
+        return line_numbers, is_reverse
+
+    def process_data(self) -> None:
+        if self.df is None:
+            return
         
+        self.df['Zeichen (Sign)'] = self.df['Zeichen (Sign)'].ffill()
+        self.plot_data = []
         
-        for part in refs.split(','):
-            side_off = 45 if 'rev' in part.lower() or 'rs' in part.lower() else 0
-            num_m = re.search(r'(\d+)', part)
-            if num_m:
-                ln = int(num_m.group(1)) + side_off
-                plot_data.append({
-                    'Line': ln,
-                    'Sign': row['Zeichen (Sign)'],
-                    'Score': int(row['Score']),
-                    'Context': trans_map.get(ln, "")
+        for _, row in self.df.iterrows():
+            clean_name = self.clean_sign_name(row['Zeichen (Sign)'])
+            refs = str(row['Belegstellen (KBo 1.8++)'])
+            line_numbers, is_reverse = self.parse_references(refs)
+            
+            try:
+                score = int(row['Score'])
+            except:
+                score = 0
+                
+            for line_num in line_numbers:
+                if is_reverse and line_num <= 45:
+                    line_num += 45
+                
+                self.plot_data.append({
+                    'Line': line_num,
+                    'Sign': clean_name,
+                    'Score': score
                 })
 
-    if not plot_data:
-        print("Keine plotbaren Daten gefunden. Prüfe die Spalte 'Belegstellen'.")
-        return
+    def create_plot(self) -> None:
+        if not self.plot_data:
+            return
 
-    pdf = pd.DataFrame(plot_data)
-    
-    
-    plt.figure(figsize=(14, 10))
-    colors = {0: '#2c7bb6', 1: '#fdae61', 2: '#d7191c'}
-    markers = {0: 'o', 1: 's', 2: 'D'}
-    
-    for score in sorted(pdf['Score'].unique()):
-        sub = pdf[pdf['Score'] == score]
-        plt.scatter(sub['Line'], sub['Sign'], c=colors[score], 
-                    marker=markers[score], label=f'Score {score}', 
-                    s=120, edgecolors='black', alpha=0.8)
+        pdf = pd.DataFrame(self.plot_data).sort_values('Sign', ascending=False)
+        
+        plt.figure(figsize=(20, 14))
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
+        
+        for score in [0, 1, 2]:
+            subset = pdf[pdf['Score'] == score]
+            if not subset.empty:
+                plt.scatter(
+                    subset['Line'],
+                    subset['Sign'],
+                    c=self.COLORS[score],
+                    marker=self.MARKERS[score],
+                    label=self.LABELS[score],
+                    s=130,
+                    edgecolors='white',
+                    alpha=0.8,
+                    zorder=3
+                )
 
-    plt.axvline(x=45.5, color='black', linestyle='--', alpha=0.4)
-    plt.title('KBo 1.8++: Verteilung palaeographischer Varianten', fontsize=14)
-    plt.xlabel('Zeile (Vs. 1-45 | Rs. 1-45)')
-    plt.ylabel('Keilschriftzeichen')
-    plt.legend(title="Score (0=Heth, 2=Assyr-Mitt)")
-    plt.grid(True, which='both', linestyle=':', alpha=0.5)
+        plt.axvline(
+            x=self.OBVERSE_REVERSE_SPLIT,
+            color='black',
+            linewidth=1.5,
+            alpha=0.6,
+            linestyle='--'
+        )
+
+        plt.text(22, -1.5, 'VORDERSEITE (Obv.)', ha='center', fontweight='bold', fontsize=13)
+        plt.text(68, -1.5, 'RÜCKSEITE (Rev.)', ha='center', fontweight='bold', fontsize=13)
+
+        plt.title('Paläographische Verteilung: Mixed Ductus in KBo 1.8++', size=20, pad=30, fontweight='bold')
+        plt.xlabel('Zeilennummer (fortlaufend)', size=14, fontweight='bold')
+        plt.ylabel('Keilschriftzeichen (Umschrift)', size=14, fontweight='bold')
+        
+        plt.xlim(0, 92)
+        plt.xticks(range(0, 95, 5))
+        plt.grid(True, axis='both', linestyle=':', alpha=0.3, zorder=1)
+        plt.legend(loc='upper right', frameon=True, shadow=True, title="Paläographischer Typ", fontsize=11)
+        
+        plt.tight_layout()
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(self.output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    def run(self) -> bool:
+        if not self.load_data():
+            return False
+        self.process_data()
+        self.create_plot()
+        return True
+
+def main():
+    file_path = "/Users/hannahschier/SIGNS Heatmap/data/kbo_data.csv"
+    output_path = "/Users/hannahschier/SIGNS Heatmap/results/kbo_heatmap_final.png"
     
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path, dpi=300)
-    print(f"FERTIG! Das Bild liegt hier: {output_path}")
+    analyzer = KBoAnalyzer(file_path, output_path)
+    analyzer.run()
 
 if __name__ == "__main__":
-    run_analysis()
+    main()
